@@ -45,11 +45,34 @@
                 <div id="ui">Room: <span id="room"></span></div>
         </div>
         <script type="module">
-                const roomId = new URLSearchParams(location.search).get('room') || prompt('Enter room code');
-                document.getElementById('room').textContent = roomId;
+                const roomId = (new URLSearchParams(location.search).get('room') || prompt('Enter room code') || '').trim();
+                document.getElementById('room').textContent = roomId || '(none)';
+                if (!roomId) alert('You must provide a room code. Reload with ?room=yourcode');
 
-                const ws = new WebSocket(location.origin.replace('http', 'ws'));
-                const pc = new RTCPeerConnection();
+                // 2) Connect WS explicitly to signalling server
+                const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+                const ws = new WebSocket(`${scheme}://${location.host}/ws`);
+                ws.addEventListener('open', () => console.log('[learner] ws open'));
+                ws.addEventListener('close', () => console.log('[learner] ws close'));
+                ws.addEventListener('error', (e) => console.log('[learner] ws error', e));
+
+                // 3) Safe sender so we never hit CONNECTING
+                function wsSendSafe(ws, obj) {
+                        const data = JSON.stringify(obj);
+                        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+                        else ws.addEventListener('open', () => ws.send(data), { once: true });
+                }
+
+                // 4) SEND JOIN IMMEDIATELY (don’t rely on onopen timing)
+                console.log('[learner] sending join for room:', roomId);
+                wsSendSafe(ws, { type: 'join', roomId });
+                const rtcConfig = {
+                        iceServers: [
+                                { urls: 'stun:stun.l.google.com:19302' },
+                                { urls: 'stun:stun1.l.google.com:19302' }
+                        ]
+                };
+                const pc = new RTCPeerConnection(rtcConfig);
 
                 // Data channel for annotations (coach to learner)
                 let dataChan = null;
@@ -66,22 +89,13 @@
                 vid.srcObject = stream;
                 stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
-                // Signalling helpers
-                function send(type, payload) { ws.readyState === 1 && ws.send(JSON.stringify({ type, payload, roomId })); }
-
-                ws.onopen = () => send('join', null);
+                function send(type, payload) { wsSendSafe(ws, { type, payload, roomId }); }
 
                 ws.onmessage = async (ev) => {
                         const { type, payload } = JSON.parse(ev.data);
-                        if (type === 'peer-joined') {
-                                // coach exists; start offer
-                                const dc = pc.createDataChannel('anno');
-                                dc.onopen = () => console.log('data channel open');
-                                dataChan = dc;
-                                const offer = await pc.createOffer();
-                                await pc.setLocalDescription(offer);
-                                send('sdp', pc.localDescription);
-                        } else if (type === 'sdp') {
+                        console.log('[learner] ws msg:', type, payload);
+
+                        if (type === 'sdp') {
                                 const desc = payload;
                                 if (desc.type === 'offer') {
                                         await pc.setRemoteDescription(desc);
@@ -91,12 +105,27 @@
                                 } else {
                                         await pc.setRemoteDescription(desc);
                                 }
-                        } else if (type === 'ice') {
-                                try { await pc.addIceCandidate(payload); } catch { }
+                                return;
                         }
+
+                        if (type === 'ice') {
+                                try { await pc.addIceCandidate(payload); } catch { }
+                                return;
+                        }
+
+                        // (Ignore created/joined/peer-joined on learner in this flow)
                 };
 
                 pc.onicecandidate = (e) => e.candidate && send('ice', e.candidate);
+
+                pc.ontrack = (event) => {
+                        if (event.track.kind === 'audio') {
+                                console.log("AUDIO")
+                                const remoteAudio = new Audio();
+                                remoteAudio.srcObject = event.streams[0];
+                                remoteAudio.play().catch(e => console.error("Audio play failed", e));
+                        }
+                };
 
                 // Draw the incoming annotations
                 const canvas = document.getElementById('overlay');
