@@ -1,0 +1,193 @@
+<!doctype html>
+<html>
+
+<head>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>
+                html,
+                body {
+                        margin: 0;
+                        height: 100%;
+                        background: #111;
+                        color: #eee;
+                        font-family: system-ui;
+                }
+
+                #wrap {
+                        position: relative;
+                        height: 100%;
+                }
+
+                video,
+                canvas {
+                        position: absolute;
+                        inset: 0;
+                        width: 100%;
+                        height: 100%;
+                        object-fit: contain;
+                        background: #000;
+                }
+
+                #toolbar {
+                        position: absolute;
+                        top: 8px;
+                        left: 8px;
+                        display: flex;
+                        gap: 8px;
+                        background: rgba(0, 0, 0, .45);
+                        padding: 8px;
+                        border-radius: 10px;
+                }
+
+                input[type=color] {
+                        width: 34px;
+                        height: 34px;
+                        border: none;
+                        border-radius: 6px;
+                        padding: 0;
+                }
+
+                input[type=range] {
+                        width: 120px;
+                }
+
+                #roomui {
+                        position: absolute;
+                        top: 8px;
+                        right: 8px;
+                        background: rgba(0, 0, 0, .45);
+                        padding: 8px;
+                        border-radius: 10px;
+                }
+
+                button {
+                        border: none;
+                        border-radius: 8px;
+                        padding: 8px 10px;
+                        background: #2b6;
+                        color: #fff;
+                        cursor: pointer
+                }
+
+                button.secondary {
+                        background: #444
+                }
+        </style>
+</head>
+
+<body>
+        <div id="wrap">
+                <video id="remote" autoplay playsinline></video>
+                <canvas id="draw"></canvas>
+                <div id="toolbar">
+                        <input id="color" type="color" value="#00ff88">
+                        <input id="size" type="range" min="2" max="18" value="5">
+                        <button id="clear" class="secondary">Clear</button>
+                </div>
+                <div id="roomui">
+                        <input id="room" placeholder="room code" style="padding:8px;border-radius:8px;border:none">
+                        <button id="connect">Connect</button>
+                </div>
+        </div>
+        <script type="module">
+                const ws = new WebSocket(location.origin.replace('http', 'ws'));
+                const pc = new RTCPeerConnection();
+                const remote = document.getElementById('remote');
+                const canvas = document.getElementById('draw');
+                const ctx = canvas.getContext('2d');
+                const roomInput = document.getElementById('room');
+                const connectBtn = document.getElementById('connect');
+                const color = document.getElementById('color');
+                const size = document.getElementById('size');
+
+                let dataChan;
+                let roomId;
+
+                function fit() { canvas.width = remote.clientWidth * devicePixelRatio; canvas.height = remote.clientHeight * devicePixelRatio; }
+                addEventListener('resize', fit); setInterval(fit, 500);
+
+                pc.ontrack = (ev) => { remote.srcObject = ev.streams[0]; fit(); };
+
+                ws.onmessage = async (ev) => {
+                        const { type, payload } = JSON.parse(ev.data);
+                        if (type === 'sdp') {
+                                const desc = payload;
+                                if (desc.type === 'offer') {
+                                        await pc.setRemoteDescription(desc);
+                                        const ans = await pc.createAnswer();
+                                        await pc.setLocalDescription(ans);
+                                        send('sdp', pc.localDescription);
+                                } else {
+                                        await pc.setRemoteDescription(desc);
+                                }
+                        } else if (type === 'ice') {
+                                try { await pc.addIceCandidate(payload); } catch { }
+                        } else if (type === 'joined') {
+                                // learner joined already; create offer to get data channel
+                                dataChan = pc.createDataChannel('anno');
+                                dataChan.onopen = () => console.log('anno channel open');
+                                const offer = await pc.createOffer();
+                                await pc.setLocalDescription(offer);
+                                send('sdp', pc.localDescription);
+                        } else if (type === 'peer-joined') {
+                                // ignore; handled by learner
+                        }
+                };
+
+                function send(type, payload) { ws.readyState === 1 && ws.send(JSON.stringify({ type, payload, roomId })); }
+
+                connectBtn.onclick = () => {
+                        roomId = roomInput.value.trim();
+                        if (!roomId) return;
+                        ws.send(JSON.stringify({ type: 'create', roomId }));
+                        // capture mic so coach can speak (optional video too if you want picture-in-picture)
+                        navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(stream => {
+                                stream.getTracks().forEach(t => pc.addTrack(t, stream));
+                        });
+                        pc.onicecandidate = (e) => e.candidate && send('ice', e.candidate);
+                };
+
+                // drawing
+                let drawing = false; let points = [];
+                canvas.addEventListener('pointerdown', e => { drawing = true; points = [toNorm(e)]; canvas.setPointerCapture(e.pointerId); });
+                canvas.addEventListener('pointermove', e => {
+                        if (!drawing) return;
+                        const p = toNorm(e); points.push(p);
+                        drawLocal(points, color.value, +size.value);
+                });
+                canvas.addEventListener('pointerup', () => {
+                        if (!drawing) return; drawing = false;
+                        if (dataChan?.readyState === 'open') {
+                                dataChan.send(JSON.stringify({ kind: 'stroke', points, color: color.value, width: +size.value }));
+                        }
+                        points = [];
+                });
+
+                document.getElementById('clear').onclick = () => {
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        if (dataChan?.readyState === 'open') dataChan.send(JSON.stringify({ kind: 'clear' }));
+                };
+
+                function toNorm(e) {
+                        const rect = canvas.getBoundingClientRect();
+                        const x = (e.clientX - rect.left) / rect.width;
+                        const y = (e.clientY - rect.top) / rect.height;
+                        return [x, y];
+                }
+
+                function drawLocal(pts, color = '#0f8', width = 4) {
+                        if (pts.length < 2) return;
+                        ctx.lineJoin = ctx.lineCap = 'round';
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = width * devicePixelRatio;
+                        ctx.beginPath();
+                        pts.forEach(([nx, ny], i) => {
+                                const x = nx * canvas.width, y = ny * canvas.height;
+                                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                        });
+                        ctx.stroke();
+                }
+        </script>
+</body>
+
+</html>

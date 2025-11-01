@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+
+<head>
+        <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+        <style>
+                html,
+                body {
+                        margin: 0;
+                        height: 100%;
+                        background: #000;
+                }
+
+                #wrap {
+                        position: relative;
+                        height: 100%;
+                }
+
+                video,
+                canvas {
+                        position: absolute;
+                        inset: 0;
+                        width: 100%;
+                        height: 100%;
+                        object-fit: cover;
+                }
+
+                #ui {
+                        position: absolute;
+                        top: 8px;
+                        left: 8px;
+                        color: #fff;
+                        background: rgba(0, 0, 0, .35);
+                        padding: 8px 10px;
+                        border-radius: 10px;
+                        font-family: system-ui;
+                }
+        </style>
+</head>
+
+<body>
+        <div id="wrap">
+                <video id="vid" autoplay playsinline muted></video>
+                <canvas id="overlay"></canvas>
+                <div id="ui">Room: <span id="room"></span></div>
+        </div>
+        <script type="module">
+                const roomId = new URLSearchParams(location.search).get('room') || prompt('Enter room code');
+                document.getElementById('room').textContent = roomId;
+
+                const ws = new WebSocket(location.origin.replace('http', 'ws'));
+                const pc = new RTCPeerConnection();
+
+                // Data channel for annotations (coach to learner)
+                let dataChan = null;
+                pc.ondatachannel = (e) => {
+                        if (e.channel.label === 'anno') {
+                                dataChan = e.channel;
+                                dataChan.onmessage = ({ data }) => drawRemote(JSON.parse(data));
+                        }
+                };
+
+                // capture camera and mic
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                const vid = document.getElementById('vid');
+                vid.srcObject = stream;
+                stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+                // Signalling helpers
+                function send(type, payload) { ws.readyState === 1 && ws.send(JSON.stringify({ type, payload, roomId })); }
+
+                ws.onopen = () => send('join', null);
+
+                ws.onmessage = async (ev) => {
+                        const { type, payload } = JSON.parse(ev.data);
+                        if (type === 'peer-joined') {
+                                // coach exists; start offer
+                                const dc = pc.createDataChannel('anno');
+                                dc.onopen = () => console.log('data channel open');
+                                dataChan = dc;
+                                const offer = await pc.createOffer();
+                                await pc.setLocalDescription(offer);
+                                send('sdp', pc.localDescription);
+                        } else if (type === 'sdp') {
+                                const desc = payload;
+                                if (desc.type === 'offer') {
+                                        await pc.setRemoteDescription(desc);
+                                        const ans = await pc.createAnswer();
+                                        await pc.setLocalDescription(ans);
+                                        send('sdp', pc.localDescription);
+                                } else {
+                                        await pc.setRemoteDescription(desc);
+                                }
+                        } else if (type === 'ice') {
+                                try { await pc.addIceCandidate(payload); } catch { }
+                        }
+                };
+
+                pc.onicecandidate = (e) => e.candidate && send('ice', e.candidate);
+
+                // Draw the incoming annotations
+                const canvas = document.getElementById('overlay');
+                const ctx = canvas.getContext('2d');
+                function fit() { canvas.width = vid.clientWidth * devicePixelRatio; canvas.height = vid.clientHeight * devicePixelRatio; }
+                addEventListener('resize', fit); fit();
+
+                function drawRemote(msg) {
+                        if (msg.kind === 'clear') { ctx.clearRect(0, 0, canvas.width, canvas.height); return; }
+                        if (msg.kind === 'stroke') {
+                                const { points, color = '#00FF88', width = 4 } = msg;
+                                ctx.lineJoin = ctx.lineCap = 'round';
+                                ctx.strokeStyle = color;
+                                ctx.lineWidth = width * devicePixelRatio;
+                                ctx.beginPath();
+                                points.forEach(([nx, ny], i) => {
+                                        const x = nx * canvas.width, y = ny * canvas.height;
+                                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                                });
+                                ctx.stroke();
+                        }
+                }
+        </script>
+</body>
+
+</html>
