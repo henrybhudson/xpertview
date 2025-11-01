@@ -41,6 +41,7 @@
 <body>
         <div id="wrap">
                 <video id="vid" autoplay playsinline muted></video>
+                <audio id="remoteAudio" autoplay></audio>
                 <canvas id="overlay"></canvas>
                 <div id="ui">Room: <span id="room"></span></div>
         </div>
@@ -69,10 +70,39 @@
                 const rtcConfig = {
                         iceServers: [
                                 { urls: 'stun:stun.l.google.com:19302' },
-                                { urls: 'stun:stun1.l.google.com:19302' }
-                        ]
+                                // TURN (replace with your creds)
+                                {
+                                        urls: [
+                                                'turn:your-turn-host:3478?transport=udp',
+                                                'turn:your-turn-host:3478?transport=tcp',
+                                                'turns:your-turn-host:5349?transport=tcp'
+                                        ],
+                                        username: 'YOUR_USERNAME',
+                                        credential: 'YOUR_CREDENTIAL'
+                                }
+                        ],
+                        // optional, but helps browsers pick faster
+                        iceCandidatePoolSize: 2
                 };
-                const pc = new RTCPeerConnection(rtcConfig);
+                const { iceServers } = await(await fetch("/ice")).json();
+                const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 2 });
+
+                async function logSelectedPair(role) {
+                        const stats = await pc.getStats();
+                        let pair, local, remote;
+                        stats.forEach(r => { if (r.type === 'candidate-pair' && r.nominated) pair = r; });
+                        if (pair) {
+                                local = stats.get(pair.localCandidateId);
+                                remote = stats.get(pair.remoteCandidateId);
+                                console.log(`[${role}] selected pair`, {
+                                        state: pair.state,
+                                        localType: local?.candidateType, remoteType: remote?.candidateType
+                                });
+                        }
+                }
+                pc.addEventListener('connectionstatechange', () => {
+                        if (pc.connectionState === 'connected') logSelectedPair('coach'); // 'learner' on learner.html
+                });
 
                 // Data channel for annotations (coach to learner)
                 let dataChan = null;
@@ -118,12 +148,12 @@
 
                 pc.onicecandidate = (e) => e.candidate && send('ice', e.candidate);
 
+                const remoteAudioEl = document.getElementById('remoteAudio');
+
                 pc.ontrack = (event) => {
                         if (event.track.kind === 'audio') {
-                                console.log("AUDIO")
-                                const remoteAudio = new Audio();
-                                remoteAudio.srcObject = event.streams[0];
-                                remoteAudio.play().catch(e => console.error("Audio play failed", e));
+                                remoteAudioEl.srcObject = event.streams[0];
+                                remoteAudioEl.play().catch(e => console.error('Audio play failed', e));
                         }
                 };
 
