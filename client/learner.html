@@ -67,23 +67,6 @@
                 // 4) SEND JOIN IMMEDIATELY (don’t rely on onopen timing)
                 console.log('[learner] sending join for room:', roomId);
                 wsSendSafe(ws, { type: 'join', roomId });
-                const rtcConfig = {
-                        iceServers: [
-                                { urls: 'stun:stun.l.google.com:19302' },
-                                // TURN (replace with your creds)
-                                {
-                                        urls: [
-                                                'turn:your-turn-host:3478?transport=udp',
-                                                'turn:your-turn-host:3478?transport=tcp',
-                                                'turns:your-turn-host:5349?transport=tcp'
-                                        ],
-                                        username: 'YOUR_USERNAME',
-                                        credential: 'YOUR_CREDENTIAL'
-                                }
-                        ],
-                        // optional, but helps browsers pick faster
-                        iceCandidatePoolSize: 2
-                };
                 const { iceServers } = await(await fetch("/ice")).json();
                 const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 2 });
 
