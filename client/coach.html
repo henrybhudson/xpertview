@@ -18,8 +18,7 @@
                         height: 100%;
                 }
 
-                video,
-                canvas {
+                video {
                         position: absolute;
                         inset: 0;
                         width: 100%;
@@ -27,6 +26,15 @@
                         object-fit: contain;
                         background: #000;
                 }
+
+                canvas {
+                        position: absolute;
+                        background: transparent;
+                        inset: 0;
+                        width: 100%;
+                        height: 100%;
+                }
+
 
                 #toolbar {
                         position: absolute;
@@ -64,7 +72,7 @@
                         border: none;
                         border-radius: 8px;
                         padding: 8px 10px;
-                        background: #2b6;
+                        background: #44BEFF;
                         color: #fff;
                         cursor: pointer
                 }
@@ -80,7 +88,7 @@
                 <video id="remote" autoplay playsinline></video>
                 <canvas id="draw"></canvas>
                 <div id="toolbar">
-                        <input id="color" type="color" value="#00ff88">
+                        <input id="color" type="color" value="#44BEFF">
                         <input id="size" type="range" min="2" max="18" value="5">
                         <button id="clear" class="secondary">Clear</button>
                 </div>
@@ -100,6 +108,41 @@
                 const remote = document.getElementById('remote');
                 const canvas = document.getElementById('draw');
                 const ctx = canvas.getContext('2d');
+                const wrap = document.getElementById('wrap');
+
+                function clamp(v, min = 0, max = 1) {
+                        return Math.max(min, Math.min(max, v));
+                }
+
+                function getContainRect(videoEl) {
+                        const vw = videoEl.videoWidth || 0;
+                        const vh = videoEl.videoHeight || 0;
+                        const cw = wrap.clientWidth;
+                        const ch = wrap.clientHeight;
+                        if (!vw || !vh || !cw || !ch) return { x: 0, y: 0, w: cw, h: ch };
+
+                        const vidAR = vw / vh;
+                        const boxAR = cw / ch;
+
+                        if (boxAR > vidAR) {
+                                const h = ch;
+                                const w = Math.round(h * vidAR);
+                                const x = Math.round((cw - w) / 2);
+                                return { x, y: 0, w, h };
+                        } else {
+                                const w = cw;
+                                const h = Math.round(w / vidAR);
+                                const y = Math.round((ch - h) / 2);
+                                return { x: 0, y, w, h };
+                        }
+                }
+
+                function setupCanvas() {
+                        const dpr = window.devicePixelRatio || 1;
+                        canvas.width = Math.floor(wrap.clientWidth * dpr);
+                        canvas.height = Math.floor(wrap.clientHeight * dpr);
+                        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                }
                 const roomInput = document.getElementById('room');
                 const connectBtn = document.getElementById('connect');
                 const color = document.getElementById('color');
@@ -108,8 +151,10 @@
                 let dataChan;
                 let roomId;
 
-                function fit() { canvas.width = remote.clientWidth * devicePixelRatio; canvas.height = remote.clientHeight * devicePixelRatio; }
-                addEventListener('resize', fit); setInterval(fit, 2500);
+                function fit() { setupCanvas(); }
+                window.addEventListener('resize', fit);
+                new ResizeObserver(fit).observe(wrap);
+                remote.addEventListener('loadedmetadata', fit);
 
                 async function logSelectedPair(role) {
                         const stats = await pc.getStats();
@@ -128,7 +173,9 @@
                         if (pc.connectionState === 'connected') logSelectedPair('coach');
                 });
 
-                pc.ontrack = (ev) => { remote.srcObject = ev.streams[0]; fit(); };
+                pc.ontrack = (ev) => {
+                        remote.srcObject = ev.streams[0];
+                };
 
                 ws.onmessage = async (ev) => {
                         const { type, payload } = JSON.parse(ev.data);
@@ -138,7 +185,7 @@
 
                         if (type === 'peer-joined') {
                                 try {
-                                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
                                         stream.getTracks().forEach(t => pc.addTrack(t, stream));
                                 } catch (err) {
                                         console.error("Failed to get audio", err);
@@ -172,6 +219,7 @@
                         }
                 };
 
+
                 pc.onicecandidate = (e) => {
                         if (e.candidate) wsSendSafe(ws, { type: 'ice', payload: e.candidate, roomId });
                 };
@@ -200,8 +248,11 @@
                 canvas.addEventListener('pointerdown', e => { drawing = true; points = [toNorm(e)]; canvas.setPointerCapture(e.pointerId); });
                 canvas.addEventListener('pointermove', e => {
                         if (!drawing) return;
-                        const p = toNorm(e); points.push(p);
-                        drawLocal(points, color.value, +size.value);
+
+                        const p = toNorm(e);
+                        const pLast = points[points.length - 1];
+                        drawLocal([pLast, p], color.value, +size.value);
+                        points.push(p);
                 });
                 canvas.addEventListener('pointerup', () => {
                         if (!drawing) return; drawing = false;
@@ -217,20 +268,23 @@
                 };
 
                 function toNorm(e) {
-                        const rect = canvas.getBoundingClientRect();
-                        const x = (e.clientX - rect.left) / rect.width;
-                        const y = (e.clientY - rect.top) / rect.height;
-                        return [x, y];
+                        const wrapRect = wrap.getBoundingClientRect();
+                        const rect = getContainRect(remote); // video draw box inside wrap
+                        const x = (e.clientX - wrapRect.left - rect.x) / rect.w;
+                        const y = (e.clientY - wrapRect.top - rect.y) / rect.h;
+                        return [clamp(x), clamp(y)];
                 }
 
                 function drawLocal(pts, color = '#0f8', width = 4) {
                         if (pts.length < 2) return;
+                        const rect = getContainRect(remote);
                         ctx.lineJoin = ctx.lineCap = 'round';
                         ctx.strokeStyle = color;
-                        ctx.lineWidth = width * devicePixelRatio;
+                        ctx.lineWidth = width;
                         ctx.beginPath();
                         pts.forEach(([nx, ny], i) => {
-                                const x = nx * canvas.width, y = ny * canvas.height;
+                                const x = rect.x + nx * rect.w;
+                                const y = rect.y + ny * rect.h;
                                 if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
                         });
                         ctx.stroke();
